@@ -1,0 +1,79 @@
+name: Python CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/my-app-ci.yaml"
+      - "my-app/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_DIR: my-app
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract Python version from .python-version
+        id: extract_version
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          version=$(cat .python-version)
+          echo "python_version=$version" >> $GITHUB_OUTPUT
+
+      - name: Set up Python ${{ steps.extract_version.outputs.python_version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.extract_version.outputs.python_version }}
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Build Python packages
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: poetry build --format wheel
+
+      - name: Install dependencies (dev)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          poetry run pip install dist/*.whl
+          poetry install --only dev
+
+      - name: Run tests and collect coverage
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: poetry run pytest
+        continue-on-error: false
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PROJECT_DIR: my-app
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Build and push Docker image
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          docker buildx build . \
+            --platform linux/amd64,linux/arm64 \
+            --push \
+            -t ghcr.io/${{ github.repository }}/my-app:latest
