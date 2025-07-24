@@ -1,0 +1,140 @@
+name: Python CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/basic-ci.yaml"
+      - "basic-ci/**"
+
+# permissions: GITHUB_TOKEN(내장 인증 토큰)의 권한 설정 (전역)
+# job 내부에서 actions/checkout@v4 같은 액션이 GITHUB_TOKEN을 필요로 할 수 있음
+# - contents: read → 저장소 코드/파일 읽기 가능
+permissions:
+  contents: read
+
+jobs:
+  # ---- 1. Build Package ----
+  build-package:
+    runs-on: ubuntu-latest # GitHub이 제공하는 최신 Ubuntu VM에서 실행
+    outputs:
+      python_version: ${{ steps.extract_version.outputs.python_version }}
+
+    steps:
+      # 저장소 코드 체크아웃 (git clone과 동일한 역할)
+      - name: Checkout repository
+        uses: actions/checkout@v4 # GitHub 공식 checkout 액션 (v4 버전 사용)
+
+      # Python 버전을 basic-ci/.python-version 파일에서 추출
+      - name: Extract Python version from .python-version
+        id: extract_version
+        working-directory: ./basic-ci
+        run: |
+          version=$(cat .python-version)
+          echo "python_version=$version" >> $GITHUB_OUTPUT  # Job output에 Python 버전 저장
+
+      # 지정된 Python 버전 설치
+      - name: Set up Python ${{ steps.extract_version.outputs.python_version }}
+        uses: actions/setup-python@v5 # GitHub 공식 Python 세팅 액션
+        with:
+          python-version: ${{ steps.extract_version.outputs.python_version }}
+
+      # Poetry 설치
+      - name: Install Poetry
+        run: pip install poetry
+
+      # wheel 패키지 빌드
+      - name: Build wheel package
+        working-directory: ./basic-ci
+        run: |
+          poetry build -f wheel
+          ls -lh dist/
+
+      # 빌드한 wheel 파일을 다른 Job에서도 쓸 수 있게 아티팩트로 업로드
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-wheel
+          path: ./basic-ci/dist/*.whl
+
+  # ---- 2. Test ----
+  test:
+    runs-on: ubuntu-latest
+    needs: build-package # build-package Job 완료 후 실행됨
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ needs.build-package.outputs.python_version }}
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      # build-package Job에서 업로드한 wheel 파일 다운로드
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: package-wheel
+          path: ./wheel
+
+      # wheel 설치
+      - name: Install built wheel
+        working-directory: ./basic-ci
+        run: |
+          poetry run pip install ../wheel/*.whl
+
+      # dev dependencies 설치 (editable 모드 없이)
+      - name: Install dev dependencies
+        working-directory: ./basic-ci
+        run: |
+          poetry install --only dev --no-root
+
+      # 테스트 실행
+      - name: Run tests and coverage
+        working-directory: ./basic-ci
+        run: |
+          poetry run pytest --cov=./ --cov-report=xml
+
+
+  # ---- 3. Build & Push Docker Image ----
+  build-image:
+    runs-on: ubuntu-latest
+    needs: test # 테스트 통과 후 실행
+    permissions:
+      # - packages: write → GitHub Container Registry(GHCR)에 Docker 이미지 푸시 가능
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: package-wheel
+          path: ./dist
+
+      # Docker Buildx 설정 (멀티 아키텍처 빌드 지원)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # GitHub Container Registry(GHCR) 로그인
+      - name: Log into GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      # Docker 이미지 빌드 & 푸시
+      - name: Build and push Docker image
+        working-directory: ./basic-ci
+        run: |
+          docker buildx build . \
+            --platform linux/amd64,linux/arm64 \
+            --push \
+            -t ghcr.io/${{ github.repository }}/basic-ci:latest
