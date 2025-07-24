@@ -77,3 +77,4 @@ jobs:
             --platform linux/amd64,linux/arm64 \
             --push \
             -t ghcr.io/${{ github.repository }}/my-app:latest
+
